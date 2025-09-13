@@ -1,0 +1,9 @@
+[project]
+name = "astrbot-plugin-counter"
+version = "0.1.0"
+description = "astrbot计数器插件 /cnt add|del|list, 消息含计数器关键字自动+1, 可添加计数器别名关键字"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "astrbot>=4.1.1",
+]
