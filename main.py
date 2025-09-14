@@ -8,6 +8,45 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 
+def _any_text_decorator():
+    """返回一个尽可能广泛匹配文本消息的装饰器，兼容不同 AstrBot 版本。
+
+    优先顺序：on_message()/message() -> on_content(r".+") -> on_text() -> no-op
+    """
+    # 1. on_message 或 message（文档推荐全消息监听）
+    for name in ("on_message", "message"):
+        deco = getattr(filter, name, None)
+        if callable(deco):
+            try:
+                return deco()
+            except Exception:
+                pass
+
+    # 2. on_content 正则全匹配
+    deco = getattr(filter, "on_content", None)
+    if callable(deco):
+        try:
+            return deco(r".+")
+        except Exception:
+            pass
+
+    # 3. 直接 on_text()
+    deco = getattr(filter, "on_text", None)
+    if callable(deco):
+        try:
+            return deco()
+        except Exception:
+            pass
+
+    # 4. 兜底：返回一个 no-op 装饰器，避免导入时报错
+    def _noop(fn):
+        return fn
+
+    return _noop
+
+
+ANY_TEXT = _any_text_decorator()
+
 
 @register("counter", "astrbot_plugin_counter", "基于关键字的计数器插件", "0.1.0")
 class CounterPlugin(Star):
@@ -86,7 +125,7 @@ class CounterPlugin(Star):
     # =====================
     # 文本检测：任意消息中包含计数器名或别名则 +1
     # =====================
-    @filter.on_text()
+    @ANY_TEXT
     async def on_any_text(self, event: AstrMessageEvent):
         text = (event.message_str or "").strip()
         if not text:
