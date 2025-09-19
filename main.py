@@ -172,7 +172,7 @@ class CounterStarPlugin(Star):
             # 冲突校验：主名与别名都不能与现有主名/别名重复
             conflicts: List[str] = []
             if n_name in self._name_index or n_name in self._alias_index:
-                conflicts.append(f"主名「{name}」已存在或被占用")
+                conflicts.append(f"计数器之「{name}」已存在或被占用")
 
             for na, a in zip(n_aliases, aliases):
                 if not na or na == n_name:
@@ -198,7 +198,7 @@ class CounterStarPlugin(Star):
             await self._save()
 
         alias_info = "无" if not aliases else "、".join(aliases)
-        yield event.plain_result(f"✅ 已添加计数器「{name}」。别名：{alias_info}")
+        yield event.plain_result(f"✅ 已添加计数器「{name}」有别名：{alias_info}")
 
     @cnt.command("del")
     async def cnt_del(self, event: AstrMessageEvent):
@@ -218,7 +218,7 @@ class CounterStarPlugin(Star):
             elif n_token in self._name_index:
                 true_name = self._name_index[n_token]
             else:
-                yield event.plain_result(f"未找到计数器「{token}」。")
+                yield event.plain_result(f"未找到计数器「{token}」")
                 return
 
             # 删除并落盘
@@ -226,7 +226,7 @@ class CounterStarPlugin(Star):
             self._rebuild_index()
             await self._save()
 
-        yield event.plain_result(f"🗑️ 已删除计数器「{true_name}」。")
+        yield event.plain_result(f"🗑️ 已删除计数器「{true_name}」")
 
     @cnt.command("list")
     async def cnt_list(self, event: AstrMessageEvent):
@@ -247,7 +247,7 @@ class CounterStarPlugin(Star):
             cnt = int(meta.get("count", 0))
             aliases = meta.get("aliases", []) or []
             alias_str = "无" if not aliases else "、".join(aliases)
-            lines.append(f"- {name}：{cnt} 次；别名：{alias_str}")
+            lines.append(f"  {name}：{cnt} 次；别名：{alias_str}")
         yield event.plain_result("\n".join(lines))
 
     # ------------------------- 事件监听：自动计数 +1 -------------------------
@@ -292,4 +292,4 @@ class CounterStarPlugin(Star):
         if self.notify_on_increment and hit_names:
             # 如需提示，可开启 self.notify_on_increment
             hit_str = "、".join(hit_names)
-            yield event.plain_result(f"已自动计数：{hit_str} +1")
+            yield event.plain_result(f"累计 {hit_str} {self.data["counters"][name]["count"]}/114514")
