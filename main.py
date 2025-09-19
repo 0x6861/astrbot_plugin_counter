@@ -1,348 +1,295 @@
-from __future__ import annotations
+# -*- coding: utf-8 -*-
+# coding with ai: ChatGPT 5 Pro
+"""
+astrbot_plugin_cnt
+一个简单易用的“词频计数”Star 插件：
+1) /cnt add <counter> [别名1 别名2 ...]  添加计数器（可带多个别名）
+2) /cnt del <counter>                       删除计数器（支持用别名指到主名）
+3) /cnt list                                列出所有计数器及次数
+4) 监听任意消息，若包含任一计数器(或其别名)的文本子串，则为该计数器 +1（默认不回消息）
+5) 数据使用 JSON 持久化存储（位于 AstrBot/data 下的插件专属目录）
 
+注意：
+- 为避免刷屏，自动 +1 时默认不回复；如需提示，可把类属性 `self.notify_on_increment` 设为 True。
+"""
+
+import asyncio
 import json
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List
 
+from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.star import Context, Star, register
-
-def _any_text_decorator():
-    """返回一个尽可能广泛匹配文本消息的装饰器，兼容不同 AstrBot 版本。
-
-    优先顺序：on_message()/message() -> on_content(r".+") -> on_text() -> no-op
-    """
-    # 1. on_message 或 message（文档推荐全消息监听）
-    for name in ("on_message", "message"):
-        deco = getattr(filter, name, None)
-        if callable(deco):
-            try:
-                return deco()
-            except Exception:
-                pass
-
-    # 2. on_content 正则全匹配
-    deco = getattr(filter, "on_content", None)
-    if callable(deco):
-        try:
-            return deco(r".+")
-        except Exception:
-            pass
-
-    # 3. 直接 on_text()
-    deco = getattr(filter, "on_text", None)
-    if callable(deco):
-        try:
-            return deco()
-        except Exception:
-            pass
-
-    # 4. 兜底：返回一个 no-op 装饰器，避免导入时报错
-    def _noop(fn):
-        return fn
-
-    return _noop
 
 
-ANY_TEXT = _any_text_decorator()
+PLUGIN_NAME = "astrbot_plugin_counter"
+DATA_FILE_NAME = "counters.json"
 
 
-@register("counter", "astrbot_plugin_counter", "基于关键字的计数器插件", "0.1.0")
-class CounterPlugin(Star):
+@register(
+    PLUGIN_NAME,
+    "your_name",
+    "计数器（Star）插件：添加/删除/列出计数器；消息命中计数器时自动+1；JSON 持久化。",
+    "0.1.0",
+    "https://github.com/0x6861/astrbot_plugin_counter",  # 若上架 GitHub 请替换为真实仓库 URL
+)
+class CounterStarPlugin(Star):
+    """计数器插件主体"""
+
+    # ------------------------- 生命周期与初始化 -------------------------
     def __init__(self, context: Context):
         super().__init__(context)
-        self._data_path = self._resolve_data_path()
-        self._counters: Dict[str, Dict[str, object]] = {}
-        # 运行期快速映射：别名/主名 -> 主名
-        self._alias_map: Dict[str, str] = {}
+        # 是否在计数+1时回提示（默认 False，避免刷屏）
+        self.notify_on_increment: bool = False
 
-    async def initialize(self):
-        """加载数据文件。"""
+        self.data_dir: Path = StarTools.get_data_dir(PLUGIN_NAME)  # 官方推荐的数据目录
+        self.data_file: Path = self.data_dir / DATA_FILE_NAME
+
+        # 数据结构：
+        # self.data = {
+        #   "counters": {
+        #       "<主名称>": {
+        #           "count": int,
+        #           "aliases": ["别名1","别名2",...]
+        #       },
+        #       ...
+        #   }
+        # }
+        self.data: Dict = {"counters": {}}
+
+        # 运行期索引，便于查重/快速匹配（均为大小写不敏感）
+        self._name_index: Dict[str, str] = {}  # 规范名 -> 主名（规范名为 casefold）
+        self._alias_index: Dict[str, str] = {}  # 规范别名 -> 主名
+
+        self._lock = asyncio.Lock()
         self._load()
 
     async def terminate(self):
-        """保存数据文件。"""
-        self._save()
+        """插件卸载/停用时调用：落盘一次"""
+        try:
+            async with self._lock:
+                await self._save()
+        except Exception as e:
+            logger.error(f"[{PLUGIN_NAME}] terminate save error: {e}")
 
-    # =====================
-    # 指令：/cnt ...
-    # =====================
-    @filter.command("cnt")
-    async def cnt(self, event: AstrMessageEvent):
-        """计数器管理：/cnt add <名称> [别名...]；/cnt del <名称|别名>；/cnt list"""
-        raw = (event.message_str or "").strip()
-        tokens = raw.split()
-        # 兼容以 /cnt 开头或仅携带参数的情况
-        if tokens and tokens[0].lstrip("/").lower() == "cnt":
-            tokens = tokens[1:]
+    # ------------------------- 工具函数 -------------------------
+    @staticmethod
+    def _norm(text: str) -> str:
+        """统一大小写与空格（用于对比、索引）"""
+        return (text or "").strip().casefold()
 
-        if not tokens:
-            yield event.plain_result(self._usage())
-            return
-
-        sub = tokens[0].lower()
-        if sub == "add":
-            if len(tokens) < 2:
-                yield event.plain_result("用法：/cnt add <名称> [别名1 别名2 ...]")
-                return
-            name = tokens[1]
-            aliases = tokens[2:]
-            ok, msg = self._add_counter(name, aliases)
-            if ok:
-                alias_text = "、".join(aliases) if aliases else "无"
-                yield event.plain_result(f"已添加计数器“{name}”。别名：{alias_text}。当前计数：0")
+    def _load(self):
+        """同步加载 JSON 数据（启动时调用一次）"""
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            if self.data_file.exists():
+                self.data = json.loads(self.data_file.read_text("utf-8"))
             else:
-                yield event.plain_result(msg)
+                self.data = {"counters": {}}
+            self._rebuild_index()
+            logger.info(
+                f"[{PLUGIN_NAME}] data loaded. counters={len(self.data['counters'])}"
+            )
+        except Exception as e:
+            logger.error(f"[{PLUGIN_NAME}] load error: {e}")
+            self.data = {"counters": {}}
+            self._rebuild_index()
+
+    async def _save(self):
+        """异步落盘，避免阻塞事件循环"""
+
+        def _write():
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            with self.data_file.open("w", encoding="utf-8") as f:
+                json.dump(self.data, f, ensure_ascii=False, indent=2)
+
+        await asyncio.to_thread(_write)
+
+    def _rebuild_index(self):
+        """按当前 self.data 重建内存索引"""
+        self._name_index.clear()
+        self._alias_index.clear()
+        for name, meta in self.data.get("counters", {}).items():
+            n = self._norm(name)
+            self._name_index[n] = name
+            for a in meta.get("aliases", []) or []:
+                na = self._norm(a)
+                # 同名别名忽略
+                if not na or na == n:
+                    continue
+                self._alias_index[na] = name
+
+    @staticmethod
+    def _split_parts(msg: str) -> List[str]:
+        """将一条消息按空白切分为词元列表"""
+        return (msg or "").strip().split()
+
+    def _extract_args_after(self, event: AstrMessageEvent, *route: str) -> List[str]:
+        """
+        从原始消息中抽取某指令路径后的“剩余参数”。
+        例如消息：/cnt add 某词 别名A 别名B
+        route=['cnt','add'] -> 返回 ['某词','别名A','别名B']
+        """
+        parts = self._split_parts(event.message_str)
+        if not parts:
+            return []
+        # 去除前缀'/'（若存在）
+        if parts[0].startswith("/"):
+            parts[0] = parts[0][1:]
+
+        # 按顺序匹配 route
+        i = 0
+        for seg in route:
+            if i >= len(parts) or self._norm(parts[i]) != self._norm(seg):
+                return []
+            i += 1
+        return parts[i:]
+
+    # ------------------------- 指令：/cnt -------------------------
+    @filter.command_group("cnt")
+    def cnt(self):
+        """计数器命令组：/cnt add|del|list"""
+        pass
+
+    @cnt.command("add")
+    async def cnt_add(self, event: AstrMessageEvent):
+        """添加计数器：/cnt add <counter> [别名1 别名2 ...]"""
+        args = self._extract_args_after(event, "cnt", "add")
+        if len(args) < 1:
+            yield event.plain_result(
+                "用法：/cnt add <计数器名> [可选：<别名1> <别名2> ...]"
+            )
             return
 
-        if sub == "del":
-            if len(tokens) < 2:
-                yield event.plain_result("用法：/cnt del <名称或别名>")
+        name = args[0]
+        aliases = [a for a in args[1:] if a.strip()]
+
+        n_name = self._norm(name)
+        n_aliases = [self._norm(a) for a in aliases]
+
+        async with self._lock:
+            # 冲突校验：主名与别名都不能与现有主名/别名重复
+            conflicts: List[str] = []
+            if n_name in self._name_index or n_name in self._alias_index:
+                conflicts.append(f"主名「{name}」已存在或被占用")
+
+            for na, a in zip(n_aliases, aliases):
+                if not na or na == n_name:
+                    conflicts.append(f"别名「{a}」无效（为空或与主名相同）")
+                elif na in self._name_index:
+                    conflicts.append(f"别名「{a}」与已有主名冲突")
+                elif na in self._alias_index:
+                    conflicts.append(f"别名「{a}」已被其它计数器占用")
+
+            if conflicts:
+                yield event.plain_result("添加失败：\n- " + "\n- ".join(conflicts))
                 return
-            # 仅群聊中限制为管理员可删除；私聊则默认允许
-            try:
-                if self._is_group_message(event) and not self._is_group_admin(event):
-                    yield event.plain_result("权限不足：仅群管理员可删除计数器。")
-                    return
-            except Exception:
-                # 万一检测异常，出于安全考虑仍然阻止删除
-                yield event.plain_result("权限检测失败：仅群管理员可删除计数器。")
+
+            # 写入数据
+            counters = self.data.setdefault("counters", {})
+            counters[name] = {
+                "count": int(
+                    counters.get(name, {}).get("count", 0)
+                ),  # 若之前存在则保留次数
+                "aliases": aliases,
+            }
+            self._rebuild_index()
+            await self._save()
+
+        alias_info = "无" if not aliases else "、".join(aliases)
+        yield event.plain_result(f"✅ 已添加计数器「{name}」。别名：{alias_info}")
+
+    @cnt.command("del")
+    async def cnt_del(self, event: AstrMessageEvent):
+        """删除计数器：/cnt del <counter>（支持用别名指向主名）"""
+        args = self._extract_args_after(event, "cnt", "del")
+        if len(args) != 1:
+            yield event.plain_result("用法：/cnt del <计数器名或其别名>")
+            return
+
+        token = args[0]
+        n_token = self._norm(token)
+
+        async with self._lock:
+            # 允许用别名定位主名
+            if n_token in self._alias_index:
+                true_name = self._alias_index[n_token]
+            elif n_token in self._name_index:
+                true_name = self._name_index[n_token]
+            else:
+                yield event.plain_result(f"未找到计数器「{token}」。")
                 return
-            key = tokens[1]
-            ok, msg = self._delete_counter(key)
-            yield event.plain_result(msg)
+
+            # 删除并落盘
+            self.data["counters"].pop(true_name, None)
+            self._rebuild_index()
+            await self._save()
+
+        yield event.plain_result(f"🗑️ 已删除计数器「{true_name}」。")
+
+    @cnt.command("list")
+    async def cnt_list(self, event: AstrMessageEvent):
+        """列出所有计数器及次数：/cnt list"""
+        counters = self.data.get("counters", {})
+        if not counters:
+            yield event.plain_result(
+                "当前没有任何计数器。可用：/cnt add <计数器名> [别名…]"
+            )
             return
 
-        if sub == "list":
-            text = self._list_counters()
-            yield event.plain_result(text)
+        # 按次数降序显示，便于查看热度
+        items = sorted(
+            counters.items(), key=lambda kv: int(kv[1].get("count", 0)), reverse=True
+        )
+        lines = ["📊 当前计数器列表："]
+        for name, meta in items:
+            cnt = int(meta.get("count", 0))
+            aliases = meta.get("aliases", []) or []
+            alias_str = "无" if not aliases else "、".join(aliases)
+            lines.append(f"- {name}：{cnt} 次；别名：{alias_str}")
+        yield event.plain_result("\n".join(lines))
+
+    # ------------------------- 事件监听：自动计数 +1 -------------------------
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def on_any_message(self, event: AstrMessageEvent):
+        """
+        监听所有消息，若消息文本包含任一计数器主名或其别名的“子串”，则为该计数器 +1。
+        - 忽略机器人自己发的消息
+        - 忽略以 /cnt 开头的指令消息，避免误计数
+        - 每个计数器每条消息最多 +1 次（同条消息内多次出现也只加 1）
+        """
+        # 忽略自身与空消息
+        if event.get_sender_id() == event.get_self_id():
             return
-
-        # 未知子命令
-        yield event.plain_result(self._usage())
-
-    # =====================
-    # 文本检测：任意消息中包含计数器名或别名则 +1
-    # =====================
-    @ANY_TEXT
-    async def on_any_text(self, event: AstrMessageEvent):
         text = (event.message_str or "").strip()
         if not text:
             return
-        # 避免对管理指令本身计数
+
+        # 忽略本插件的指令消息
         if text.startswith("/cnt"):
             return
 
-        # 找出本条消息触发的所有主计数器名（同一主计数器仅+1一次）
-        triggered: Set[str] = set()
-        for main, meta in self._counters.items():
-            names: List[str] = [main] + list(meta.get("aliases", []))  # type: ignore[arg-type]
-            for n in names:
-                if n and n in text:
-                    triggered.add(main)
-                    break
+        tnorm = self._norm(text)
+        hit_names: List[str] = []
 
-        if not triggered:
-            return
+        async with self._lock:
+            for name, meta in self.data.get("counters", {}).items():
+                # 对每个计数器，任一命中则 +1（不累加多次）
+                patterns = [name] + (meta.get("aliases", []) or [])
+                for p in patterns:
+                    if not p:
+                        continue
+                    if self._norm(p) and self._norm(p) in tnorm:
+                        self.data["counters"][name]["count"] = (
+                            int(meta.get("count", 0)) + 1
+                        )
+                        hit_names.append(name)
+                        break  # 该计数器已命中一次，跳到下一个计数器
+            if hit_names:
+                await self._save()
 
-        # 统一加一并持久化
-        for main in triggered:
-            self._counters[main]["count"] = int(self._counters[main].get("count", 0)) + 1
-        self._save()
-
-        # 回复简要统计
-        parts = [f"{name}({self._counters[name]['count']})" for name in sorted(triggered)]
-        yield event.plain_result("计数 +1 → " + "，".join(parts))
-
-    # =====================
-    # 内部方法
-    # =====================
-    def _usage(self) -> str:
-        return (
-            "用法：\n"
-            "- /cnt add <名称> [别名1 别名2 ...]\n"
-            "- /cnt del <名称或别名>\n"
-            "- /cnt list"
-        )
-
-    def _rebuild_alias_map(self):
-        self._alias_map.clear()
-        for main, meta in self._counters.items():
-            self._alias_map[main] = main
-            for a in meta.get("aliases", []):
-                self._alias_map[str(a)] = main
-
-    def _add_counter(self, name: str, aliases: List[str]) -> Tuple[bool, str]:
-        name = name.strip()
-        aliases = [a.strip() for a in aliases if a.strip()]
-        if not name:
-            return False, "名称不能为空。"
-
-        # 冲突检测：名称或任一别名与现有主名/别名冲突
-        for item in [name] + aliases:
-            if item in self._alias_map:
-                exist_main = self._alias_map[item]
-                return False, f"“{item}”已存在（归属计数器“{exist_main}”）。"
-
-        if name not in self._counters:
-            self._counters[name] = {"count": 0, "aliases": []}
-
-        exists_aliases = set(self._counters[name].get("aliases", []))
-        exists_aliases.update(aliases)
-        self._counters[name]["aliases"] = sorted(list(exists_aliases))
-        self._rebuild_alias_map()
-        self._save()
-        return True, "OK"
-
-    def _delete_counter(self, key: str) -> Tuple[bool, str]:
-        key = key.strip()
-        if not key:
-            return False, "名称不能为空。"
-        if key not in self._alias_map:
-            return False, f"未找到计数器或别名：“{key}”。"
-        main = self._alias_map[key]
-        # 删除主计数器
-        if main in self._counters:
-            del self._counters[main]
-        self._rebuild_alias_map()
-        self._save()
-        return True, f"已删除计数器“{main}”。"
-
-    def _list_counters(self) -> str:
-        if not self._counters:
-            return "暂无计数器。使用 /cnt add <名称> 添加。"
-        lines: List[str] = []
-        for main in sorted(self._counters.keys()):
-            meta = self._counters[main]
-            count = int(meta.get("count", 0))
-            aliases = list(meta.get("aliases", []))
-            if aliases:
-                lines.append(f"{main}：{count}（别名：{', '.join(aliases)}）")
-            else:
-                lines.append(f"{main}：{count}")
-        return "\n".join(lines)
-
-    def _load(self):
-        try:
-            if self._data_path.exists():
-                data = json.loads(self._data_path.read_text(encoding="utf-8"))
-                self._counters = data.get("counters", {})
-            else:
-                self._counters = {}
-        except Exception as e:
-            logger.error(f"读取数据失败：{e}")
-            self._counters = {}
-        self._rebuild_alias_map()
-
-    def _save(self):
-        try:
-            payload = {"counters": self._counters}
-            # 确保父目录存在
-            self._data_path.parent.mkdir(parents=True, exist_ok=True)
-            self._data_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception as e:
-            logger.error(f"保存数据失败：{e}")
-
-    # =====================
-    # 权限与上下文检测（适配不同适配器的可能接口）
-    # =====================
-    def _is_group_message(self, event: AstrMessageEvent) -> bool:
-        candidates = [
-            "is_group",
-            "is_group_message",
-        ]
-        for name in candidates:
-            attr = getattr(event, name, None)
-            if isinstance(attr, bool):
-                return attr
-            if callable(attr):
-                try:
-                    res = attr()
-                    if isinstance(res, bool):
-                        return res
-                except Exception:
-                    pass
-        # 如果存在 group_id 之类的字段，也认为是群聊
-        if getattr(event, "group_id", None) is not None:
-            return True
-        return False
-
-    def _is_group_admin(self, event: AstrMessageEvent) -> bool:
-        # 直接布尔接口
-        bool_candidates = [
-            "is_group_admin",
-            "sender_is_admin",
-        ]
-        for name in bool_candidates:
-            attr = getattr(event, name, None)
-            if isinstance(attr, bool):
-                return attr
-            if callable(attr):
-                try:
-                    res = attr()
-                    if isinstance(res, bool):
-                        return res
-                except Exception:
-                    pass
-
-        # 角色字符串接口
-        role_candidates = [
-            "get_sender_role",
-            "get_sender_permission",
-            "get_member_role",
-            "sender_role",
-        ]
-        for name in role_candidates:
-            attr = getattr(event, name, None)
-            role = None
-            if isinstance(attr, str):
-                role = attr
-            elif callable(attr):
-                try:
-                    role = attr()
-                except Exception:
-                    role = None
-            if isinstance(role, str):
-                r = role.lower()
-                if any(k in r for k in ["admin", "administrator", "owner", "manager", "群主", "管理员"]):
-                    return True
-                return False
-
-        # 默认非管理员
-        return False
-
-    # =====================
-    # 数据目录解析（遵循 AstrBot data 目录规范）
-    # =====================
-    def _resolve_data_path(self) -> Path:
-        base: Path | None = None
-        ctx = getattr(self, "context", None)
-
-        # 优先使用上下文提供的数据目录（尽量兼容不同 API 命名）
-        candidate_attrs = [
-            "get_data_dir",
-            "get_data_path",
-            "get_plugin_data_dir",
-            "data_dir",
-            "data_path",
-        ]
-        for name in candidate_attrs:
-            attr = getattr(ctx, name, None)
-            try:
-                if callable(attr):
-                    p = attr()  # 期望返回字符串或 Path
-                else:
-                    p = attr
-                if p:
-                    base = Path(str(p))
-                    break
-            except Exception:
-                continue
-
-        # 退化：使用工作目录下 data/counter
-        if base is None:
-            base = Path.cwd() / "data"
-
-        data_dir = base / "counter"
-        return data_dir / "data.json"
+        if self.notify_on_increment and hit_names:
+            # 如需提示，可开启 self.notify_on_increment
+            hit_str = "、".join(hit_names)
+            yield event.plain_result(f"已自动计数：{hit_str} +1")
