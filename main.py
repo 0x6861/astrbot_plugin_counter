@@ -41,7 +41,7 @@ class CounterStarPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
         # 是否在计数+1时回提示（默认 False，避免刷屏）
-        self.notify_on_increment: bool = False
+        self.notify_on_increment: bool = True
 
         self.data_dir: Path = StarTools.get_data_dir(PLUGIN_NAME)  # 官方推荐的数据目录
         self.data_file: Path = self.data_dir / DATA_FILE_NAME
