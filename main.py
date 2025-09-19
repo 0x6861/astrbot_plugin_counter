@@ -292,4 +292,4 @@ class CounterStarPlugin(Star):
         if self.notify_on_increment and hit_names:
             # 如需提示，可开启 self.notify_on_increment
             hit_str = "、".join(hit_names)
-            yield event.plain_result(f"累计 {hit_str} {self.data["counters"][name]["count"]}/114514")
+            yield event.plain_result(f"累计 {hit_str} {self.data["counters"][hit_str]["count"]}/114514")
