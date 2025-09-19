@@ -296,4 +296,25 @@ class CounterStarPlugin(Star):
         if self.notify_on_increment and hit_names:
             # 如需提示，可开启 self.notify_on_increment
             hit_str = "、".join(hit_names)
-            yield event.plain_result(f"累计 {hit_str} {self.data["counters"][this_name]["count"]}/114514")
+            this_count: int = self.data["counters"][this_name]["count"]
+
+            if this_count == 114 or this_count == 1145 or this_count == 11451 or this_count == 114514:
+                yield event.plain_result(f"恶臭的计数器就是「{this_name}」啦~~~")
+            elif this_count == 1919 or this_count == 19191 or this_count == 191919:
+                yield event.plain_result(f"就这？————「{this_name}」")
+            elif this_count == 520 or this_count == 1314:
+                yield event.plain_result(f"💗💗💗我爱你! 一生一世! ————「{this_name}」")
+            elif this_count == 6 or this_count == 66 or this_count == 666 or this_count == 6666:
+                yield event.plain_result(f"{this_name}, 6")
+            elif this_count == 233 or this_count == 2333 or this_count == 23333:
+                yield event.plain_result("23333————")
+            elif this_count == 100 or this_count == 1000 or this_count == 10000 or this_count == 100000:
+                yield event.plain_result(f"🎉🎉🎉恭喜！计数器「{this_name}」达成 {this_count} 次！")
+            elif this_count == 68:
+                yield event.plain_result(f"「{this_name}」的 68 其实和 h 有些关联......?")
+            elif this_count == 61:
+                yield event.plain_result(f"「{this_name}」的 61 其实和 a 有些关联......?")
+            elif this_count == 6861:
+                yield event.plain_result(f"「{this_name}」的 6861 其实和 ha 有些关联......? 难道是 hami !")
+            else:
+                yield event.plain_result(f"累计 {hit_str} {this_count}/114514")
