@@ -1,5 +1,5 @@
 name: astrbot_plugin_counter
 desc: 计数器插件; 用法 /cnt add|del|list ; 当消息包含计数器或其别名时自动+1; JSON持久化
-version: v0.1.1.1
+version: v0.1.1.2
 author: hami
 repo: https://github.com/0x6861/astrbot_plugin_counter

@@ -272,6 +272,7 @@ class CounterStarPlugin(Star):
 
         tnorm = self._norm(text)
         hit_names: List[str] = []
+        this_name: str
 
         async with self._lock:
             for name, meta in self.data.get("counters", {}).items():
@@ -285,6 +286,9 @@ class CounterStarPlugin(Star):
                             int(meta.get("count", 0)) + 1
                         )
                         hit_names.append(name)
+
+                        # 记录最后一个命中的计数器名，便于提示
+                        this_name = name
                         break  # 该计数器已命中一次，跳到下一个计数器
             if hit_names:
                 await self._save()
@@ -292,4 +296,4 @@ class CounterStarPlugin(Star):
         if self.notify_on_increment and hit_names:
             # 如需提示，可开启 self.notify_on_increment
             hit_str = "、".join(hit_names)
-            yield event.plain_result(f"累计 {hit_str} {self.data["counters"][hit_str]["count"]}/114514")
+            yield event.plain_result(f"累计 {hit_str} {this_name}/114514")
