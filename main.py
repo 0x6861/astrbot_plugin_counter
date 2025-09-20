@@ -29,9 +29,9 @@ DATA_FILE_NAME = "counters.json"
 
 @register(
     PLUGIN_NAME,
-    "your_name",
+    "hami",
     "计数器（Star）插件：添加/删除/列出计数器；消息命中计数器时自动+1；JSON 持久化。",
-    "0.1.0",
+    "v0.1.1.3",
     "https://github.com/0x6861/astrbot_plugin_counter",  # 若上架 GitHub 请替换为真实仓库 URL
 )
 class CounterStarPlugin(Star):
