@@ -147,13 +147,35 @@ class CounterStarPlugin(Star):
         return parts[i:]
 
     # ------------------------- 指令：/cnt -------------------------
-    @filter.command_group("cnt")
-    def cnt(self):
-        """计数器命令组：/cnt add|del|list"""
-        pass
+    @filter.command("cnt")
+    async def cnt(self, event: AstrMessageEvent):
+        """计数器命令：/cnt add|del|list
 
-    @cnt.command("add")
-    async def cnt_add(self, event: AstrMessageEvent):
+        sub(string): 子命令（add|del|list）
+        其余参数: 根据子命令不同而不同
+        """
+        args = self._extract_args_after(event, "cnt")
+        if not args:
+            yield event.plain_result(
+                "用法：/cnt add <计数器名> [别名…]；/cnt del <名称或别名>；/cnt list"
+            )
+            return
+
+        sub = self._norm(args[0])
+
+        if sub == "add":
+            async for r in self._cnt_add(event):
+                yield r
+        elif sub == "del":
+            async for r in self._cnt_del(event):
+                yield r
+        elif sub == "list":
+            async for r in self._cnt_list(event):
+                yield r
+        else:
+            yield event.plain_result("未知子命令。可用：add / del / list")
+
+    async def _cnt_add(self, event: AstrMessageEvent):
         """添加计数器：/cnt add <counter> [别名1 别名2 ...]"""
         args = self._extract_args_after(event, "cnt", "add")
         if len(args) < 1:
@@ -200,8 +222,7 @@ class CounterStarPlugin(Star):
         alias_info = "无" if not aliases else "、".join(aliases)
         yield event.plain_result(f"✅ 已添加计数器「{name}」有别名：{alias_info}")
 
-    @cnt.command("del")
-    async def cnt_del(self, event: AstrMessageEvent):
+    async def _cnt_del(self, event: AstrMessageEvent):
         """删除计数器：/cnt del <counter>（支持用别名指向主名）"""
         args = self._extract_args_after(event, "cnt", "del")
         if len(args) != 1:
@@ -228,8 +249,7 @@ class CounterStarPlugin(Star):
 
         yield event.plain_result(f"🗑️ 已删除计数器「{true_name}」")
 
-    @cnt.command("list")
-    async def cnt_list(self, event: AstrMessageEvent):
+    async def _cnt_list(self, event: AstrMessageEvent):
         """列出所有计数器及次数：/cnt list"""
         counters = self.data.get("counters", {})
         if not counters:
@@ -260,8 +280,12 @@ class CounterStarPlugin(Star):
         - 每个计数器每条消息最多 +1 次（同条消息内多次出现也只加 1）
         """
         # 忽略自身与空消息
-        if event.get_sender_id() == event.get_self_id():
-            return
+        try:
+            if event.get_sender_id() == event.get_self_id():
+                return
+        except AttributeError:
+            # 某些平台/版本可能无该方法，忽略检查
+            pass
         text = (event.message_str or "").strip()
         if not text:
             return
@@ -272,7 +296,6 @@ class CounterStarPlugin(Star):
 
         tnorm = self._norm(text)
         hit_names: List[str] = []
-        this_name: str
 
         async with self._lock:
             for name, meta in self.data.get("counters", {}).items():
@@ -286,35 +309,44 @@ class CounterStarPlugin(Star):
                             int(meta.get("count", 0)) + 1
                         )
                         hit_names.append(name)
-
-                        # 记录最后一个命中的计数器名，便于提示
-                        this_name = name
                         break  # 该计数器已命中一次，跳到下一个计数器
             if hit_names:
                 await self._save()
 
         if self.notify_on_increment and hit_names:
-            # 如需提示，可开启 self.notify_on_increment
-            hit_str = "、".join(hit_names)
-            this_count: int = self.data["counters"][this_name]["count"]
-
-            if this_count == 114 or this_count == 1145 or this_count == 11451 or this_count == 114514:
-                yield event.plain_result(f"恶臭的计数器就是「{this_name}」啦~~~")
-            elif this_count == 1919 or this_count == 19191 or this_count == 191919:
-                yield event.plain_result(f"就这？————「{this_name}」")
-            elif this_count == 520 or this_count == 1314:
-                yield event.plain_result(f"💗💗💗我爱你! 一生一世! ————「{this_name}」")
-            elif this_count == 6 or this_count == 66 or this_count == 666 or this_count == 6666:
-                yield event.plain_result(f"{this_name}, 6")
-            elif this_count == 233 or this_count == 2333 or this_count == 23333:
-                yield event.plain_result("23333————")
-            elif this_count == 100 or this_count == 1000 or this_count == 10000 or this_count == 100000:
-                yield event.plain_result(f"🎉🎉🎉恭喜！计数器「{this_name}」达成 {this_count} 次！")
-            elif this_count == 68:
-                yield event.plain_result(f"「{this_name}」的 68 其实和 h 有些关联......?")
-            elif this_count == 61:
-                yield event.plain_result(f"「{this_name}」的 61 其实和 a 有些关联......?")
-            elif this_count == 6861:
-                yield event.plain_result(f"「{this_name}」的 6861 其实和 ha 有些关联......? 难道是 hami !")
+            # 单个命中：走特殊规则或默认提示；多个命中：逐个展示准确计数
+            if len(hit_names) == 1:
+                name = hit_names[0]
+                count = int(self.data["counters"][name]["count"])
+                special = self._get_special_message(name, count)
+                if special:
+                    yield event.plain_result(special)
+                else:
+                    yield event.plain_result(f"累计 {name} {count}/114514")
             else:
-                yield event.plain_result(f"累计 {hit_str} {this_count}/114514")
+                parts = [
+                    f"{n}({int(self.data['counters'][n]['count'])})" for n in hit_names
+                ]
+                yield event.plain_result(f"累计 {'、'.join(parts)} /114514")
+
+    # ------------------------- 特殊计数提示规则 -------------------------
+    def _get_special_message(self, name: str, count: int) -> str | None:
+        """返回某计数值的特殊提示文案；若无匹配返回 None。
+
+        维护性：只需在集合中增减数值或添加分支即可。
+        """
+        group_map = (
+            ({114, 1145, 11451, 114514}, lambda n, c: f"恶臭的计数器就是「{n}」啦~~~"),
+            ({1919, 19191, 191919}, lambda n, c: f"就这？————「{n}」"),
+            ({520, 1314}, lambda n, c: f"💗💗💗我爱你! 一生一世! ————「{n}」"),
+            ({6, 66, 666, 6666}, lambda n, c: f"{n}, 6"),
+            ({233, 2333, 23333}, lambda n, c: "23333————"),
+            (
+                {100, 1000, 10000, 100000},
+                lambda n, c: f"🎉🎉🎉恭喜！计数器「{n}」达成 {c} 次！",
+            ),
+        )
+        for nums, fmt in group_map:
+            if count in nums:
+                return fmt(name, count)
+        return None
