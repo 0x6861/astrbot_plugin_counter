@@ -29,8 +29,8 @@ DATA_FILE_NAME = "counters.json"
 @register(
     PLUGIN_NAME,
     "hami",
-    "计数器（Star）插件：添加/删除/列出计数器；消息命中计数器时自动+1；JSON 持久化。",
-    "v0.1.2",
+    "计数器插件：添加/删除/列出计数器；消息命中计数器时自动+1；JSON 持久化。",
+    "v0.1.2.1",
     "https://github.com/0x6861/astrbot_plugin_counter",  # 若上架 GitHub 请替换为真实仓库 URL
 )
 class CounterStarPlugin(Star):
@@ -324,9 +324,9 @@ class CounterStarPlugin(Star):
                     yield event.plain_result(f"累计 {name} {count}/114514")
             else:
                 parts = [
-                    f"{n}({int(self.data['counters'][n]['count'])})" for n in hit_names
+                    f"累计 {n} {int(self.data['counters'][n]['count'])}/114514\n" for n in hit_names
                 ]
-                yield event.plain_result(f"累计 {'、'.join(parts)} /114514")
+                yield event.plain_result(f"{''.join(parts)}")
 
     # ------------------------- 特殊计数提示规则 -------------------------
     def _get_special_message(self, name: str, count: int) -> str | None:
