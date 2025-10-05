@@ -161,18 +161,18 @@ class CounterStarPlugin(Star):
             return
 
         sub = self._norm(args[0])
-
-        if sub == "add":
-            async for r in self._cnt_add(event):
-                yield r
-        elif sub == "del":
-            async for r in self._cnt_del(event):
-                yield r
-        elif sub == "list":
-            async for r in self._cnt_list(event):
-                yield r
-        else:
-            yield event.plain_result("未知子命令。可用：add / del / list")
+        match sub:
+            case "add":
+                async for r in self._cnt_add(event):
+                    yield r
+            case "del":
+                async for r in self._cnt_del(event):
+                    yield r
+            case "list":
+                async for r in self._cnt_list(event):
+                    yield r
+            case _:
+                yield event.plain_result("未知子命令")
 
     async def _cnt_add(self, event: AstrMessageEvent):
         """添加计数器：/cnt add <counter> [别名1 别名2 ...]"""
@@ -193,7 +193,7 @@ class CounterStarPlugin(Star):
             # 冲突校验：主名与别名都不能与现有主名/别名重复
             conflicts: List[str] = []
             if n_name in self._name_index or n_name in self._alias_index:
-                conflicts.append(f"计数器之「{name}」已存在或被占用")
+                conflicts.append(f"计数器「{name}」已存在或被占用")
 
             for na, a in zip(n_aliases, aliases):
                 if not na or na == n_name:
@@ -268,6 +268,74 @@ class CounterStarPlugin(Star):
             alias_str = "无" if not aliases else "、".join(aliases)
             lines.append(f"  {name}：{cnt} 次；别名：{alias_str}")
         yield event.plain_result("\n".join(lines))
+
+    async def _cnt_delname(self, event: AstrMessageEvent):
+        """
+        删除某个计数器的别名
+
+        用法: /cnt delname <计数器的别名>
+
+        只能删除别名, 不能删除主名
+        """
+        args = self._extract_args_after(event, "cnt", "delname")
+        if len(args) != 1:
+            yield event.plain_result("用法：/cnt delname <计数器的别名>")
+            return
+        alias = args[0]
+        n_alias = self._norm(alias)
+        async with self._lock:
+            if n_alias not in self._alias_index:
+                yield event.plain_result(f"未找到别名「{alias}」")
+                return
+            true_name = self._alias_index[n_alias]
+            aliases = self.data["counters"][true_name].get("aliases", []) or []
+            aliases = [a for a in aliases if self._norm(a) != n_alias]
+            self.data["counters"][true_name]["aliases"] = aliases
+            self._rebuild_index()
+            await self._save()
+        yield event.plain_result(f"🗑️ 已删除计数器「{true_name}」的别名「{alias}」")
+    
+    async def _cnt_addname(self, event: AstrMessageEvent):
+        """
+        为某个计数器添加别名
+
+        用法: /cnt addname <计数器的主名> <别名1> [别名2 ...]
+        """
+        args = self._extract_args_after(event, "cnt", "addname")
+        if len(args) < 2:
+            yield event.plain_result("用法：/cnt addname <计数器的主名> <别名1> [别名2 ...]")
+            return
+        name = args[0]
+        aliases = [a for a in args[1:] if a.strip()]
+        n_name = self._norm(name)
+        n_aliases = [self._norm(a) for a in aliases]
+        async with self._lock:
+            if n_name not in self._name_index:
+                yield event.plain_result(f"未找到计数器「{name}」")
+                return
+            true_name = self._name_index[n_name]
+            existing_aliases = self.data["counters"][true_name].get("aliases", []) or []
+            existing_n_aliases = {self._norm(a) for a in existing_aliases}
+            conflicts: List[str] = []
+            for na, a in zip(n_aliases, aliases):
+                if not na or na == n_name:
+                    conflicts.append(f"别名「{a}」无效（为空或与主名相同）")
+                elif na in self._name_index:
+                    conflicts.append(f"别名「{a}」与已有主名冲突")
+                elif na in self._alias_index and self._alias_index[na] != true_name:
+                    conflicts.append(f"别名「{a}」已被其它计数器占用")
+                elif na in existing_n_aliases:
+                    conflicts.append(f"别名「{a}」已存在于计数器「{true_name}」中")
+            if conflicts:
+                yield event.plain_result("添加失败：\n- " + "\n- ".join(conflicts))
+                return
+            # 添加并落盘
+            updated_aliases = existing_aliases + aliases
+            self.data["counters"][true_name]["aliases"] = updated_aliases
+            self._rebuild_index()
+            await self._save()
+        alias_info = "、".join(aliases)
+        yield event.plain_result(f"✅ 已为计数器「{true_name}」添加别名：{alias_info}")
 
     # ------------------------- 事件监听：自动计数 +1 -------------------------
     @filter.event_message_type(filter.EventMessageType.ALL)
