@@ -171,6 +171,12 @@ class CounterStarPlugin(Star):
             case "list":
                 async for r in self._cnt_list(event):
                     yield r
+            case "addname":
+                async for r in self._cnt_addname(event):
+                    yield r
+            case "delname":
+                async for r in self._cnt_delname(event):
+                    yield r
             case _:
                 yield event.plain_result("未知子命令")
 
